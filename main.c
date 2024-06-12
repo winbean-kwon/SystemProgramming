@@ -4,8 +4,10 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <string.h>
+#include <signal.h>
 
-// 구조체 선언: 주식 데이터
+// 주식 데이터 구조체 선언
 struct stock_data {
     char symbol[10];
     float open;
@@ -15,28 +17,58 @@ struct stock_data {
     int volume;
 };
 
-// analyze_stock 함수 선언
+// 주식 데이터를 분석하는 함수 선언
 void analyze_stock(struct stock_data* stock);
 
+// IPC 핸들링 함수 선언
+void handle_ipc();
+
+// 시그널 핸들러 함수
+void signal_handler(int sig) {
+    if (sig == SIGUSR1) { // SIGUSR1 시그널을 받으면 메시지를 출력합니다.
+        printf("SIGUSR1 signal을 받았습니다.\n");
+    }
+}
+
+// 메인 함수
 int main() {
+    // 시그널 핸들러 등록
+    struct sigaction shoot;
+    shoot.sa_handler = signal_handler;
+    sigemptyset(&shoot.sa_mask);
+    shoot.sa_flags = 0;
+
+    if (sigaction(SIGUSR1, &shoot, NULL) == -1) {
+        perror("시그널 받기 실패");
+        return 1;
+    }
+
     // 파일의 마지막 수정 날짜 확인
     struct stat attr;
-    stat("nasdaq_stocks_6months.csv", &attr);
+    if (stat("nasdaq_stocks_6months.csv", &attr) != 0) {
+        perror("파일 정보를 불러오는데 실패하였습니다.");
+        return 1;
+    }
     struct tm* mod_time = localtime(&attr.st_mtime);
+    char mod_time_str[20];
+    strftime(mod_time_str, sizeof(mod_time_str), "%Y-%m-%d %h %m %s", mod_time);
 
+    // 현재 시간을 구함
     time_t current_time;
     time(&current_time);
     struct tm* now = localtime(&current_time);
+    char now_str[20];
+    strftime(now_str, sizeof(now_str), "%Y-%m-%d %h %m %s", now);
 
-    if (mod_time->tm_year == now->tm_year &&
-        mod_time->tm_mon == now->tm_mon &&
-        mod_time->tm_mday == now->tm_mday) {
+    printf("Last modified: %s\n", mod_time_str);
+    printf("Current date: %s\n", now_str);
+
+    // 파일 수정 날짜가 오늘인지 확인
+    if (strcmp(mod_time_str, now_str) == 0) {
         printf("File was last modified today.\n");
-    } else {
-        printf("File was last modified on: %d-%d-%d\n",
-               mod_time->tm_year + 1900, mod_time->tm_mon + 1, mod_time->tm_mday);
+    } else { // 만약 오늘이 아니라면 python 스크립트 실행
+        printf("File was last modified on: %s\n", mod_time_str);
         printf("Running the update program...\n");
-        system("/usr/bin/python3 /home/seungbin/test/project/make_data.py");
 
         // 자식 프로세스 생성
         pid_t pid = fork();
@@ -46,55 +78,48 @@ int main() {
         }
 
         if (pid == 0) {
-            // 자식 프로세스: 주식 데이터를 읽고 분석
+            // Python 스크립트 실행
+            char *args[] = {"/usr/bin/python3", "/home/seungbin/test/SystemProgramming/make_data.py", NULL};
+            execvp(args[0], args);
+
+            // execvp가 실패하면 에러 메시지 출력
+            perror("execvp 실패하였습니다");
+            exit(1);
+        } else {
+            // 부모 프로세스: 자식 프로세스 종료 대기
+            wait(NULL);
+            printf("자식 프로세스 종료 되었습니다.\n");
+
+            // 주식 데이터를 읽고 분석
             FILE* file = fopen("nasdaq_stocks_6months.csv", "r");
             if (file == NULL) {
-                perror("Failed to open file");
-                exit(1);
+                perror("파일을 여는데 실패하였습니다");
+                return 1;
             }
 
-            struct stock_data stocks[100]; // 배열 선언
+            struct stock_data stock;
+            struct stock_data last_stock;
             int index = 0;
 
-            // CSV 파일을 읽어 구조체 배열에 주식 데이터를 저장
-            while (fscanf(file, "%10[^,],%f,%f,%f,%f,%d\n",
-                          stocks[index].symbol, &stocks[index].open, &stocks[index].high,
-                          &stocks[index].low, &stocks[index].close, &stocks[index].volume) != EOF) {
+            // CSV 파일을 읽어 구조체에 주식 데이터를 저장
+            while (fscanf(file, "%s,%f,%f,%f,%f,%d\n",
+                          stock.symbol, &stock.open, &stock.high,
+                          &stock.low, &stock.close, &stock.volume) != EOF) {
+                last_stock = stock;  // 마지막 읽은 주식 데이터 저장
                 index++;
             }
 
             fclose(file);
 
-            // 가장 마지막 인덱스 계산
-            int last_index = index - 1; // 가장 마지막 인덱스를 계산
-
             // 주식 데이터 분석
-            analyze_stock(&stocks[last_index]); // 가장 마지막 인덱스 데이터 분석
-
-            // 시스템 정보 출력
-            printf("System Info: \n");
-            system("uname -a");
-
-            // exec 함수 사용 예제
-            char *args[] = {"ls", "-l", NULL};
-            execvp(args[0], args);
-
-            // 자식 프로세스 종료
-            exit(0);
-        } else {
-            // 부모 프로세스: 자식 프로세스 종료 대기
-            wait(NULL);
-            printf("Child process finished.\n");
+            analyze_stock(&last_stock); // 가장 마지막으로 읽은 데이터 분석
         }
     }
 
-    return 0;
-}
+    handle_ipc();
 
-// 주식 데이터 분석 함수
-void analyze_stock(struct stock_data* stock) {
-    printf("Analyzing stock: %s\n", stock->symbol);
-    // 간단한 분석 예제
-    float avg = (stock->high + stock->low) / 2;
-    printf("Average price for %s: %.2f\n", stock->symbol, avg);
+    // SIGUSR1 시그널을 부모 프로세스에 보냄
+    kill(getpid(), SIGUSR1);
+
+    return 0;
 }
